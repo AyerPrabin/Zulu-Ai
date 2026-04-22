@@ -648,6 +648,22 @@ def process_boss_message(hwnd, msg, user_type, chat_name):
     if any(t in msg for t in _loop_triggers):
         return
 
+    # ── 🖥️ PC CONTROL ROUTER (zulu_pc.py) — instant commands ────────────────
+    # Screenshot, volume, lock screen, brightness, open/close apps, etc.
+    # Runs FIRST so PC commands never hit the AI (faster, cheaper)
+    try:
+        from zulu_pc import handle_pc_command
+        _cmd = msg.strip()[len("ZULU "):] if upper.startswith("ZULU ") else msg.strip()
+        pc_handled, pc_response = handle_pc_command(_cmd, user_type)
+        if pc_handled:
+            send_reply(hwnd, pc_response)
+            ZMEM.remember_task(user_type, msg[:60], "pc_command", pc_response[:80])
+            return
+    except ImportError:
+        pass  # zulu_pc not available
+    except Exception as _pce:
+        zlog("tray", f"PC command error: {_pce}", "WARN")
+
     # ── Always-on commands ─────────────────────────────────────────────────
     if "ZULU OFF" in upper:
         ZSTATE.set("is_active", False)
@@ -1858,3 +1874,434 @@ if __name__ == "__main__":
             print(f"⚠️ Loop error: {e}")
             push_event("error", {"msg": str(e)})
         time.sleep(0.5)
+# ═══════════════════════════════════════════════════════════════════════════════
+# ZULU v14.0 — PATCH FILE
+# Apply these changes to wire up zulu_pc.py and zulu_voice.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# PATCH 1 ── zulu_tray.py
+# ───────────────────────────────────────────────────────────────────────────────
+
+# ── Step 1: Add import near the top (after "from boardroom_engine import ...")
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+from zulu_pc import handle_pc_command
+"""
+
+# ── Step 2: Add split_message utility (paste just above send_reply)
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+# ─────────────────────────────────────────────────────────────────────────────
+# ✂️  SPLIT LONG MESSAGES  (WhatsApp ~4096 char limit)
+# Splits at sentence boundaries so messages read cleanly.
+# ─────────────────────────────────────────────────────────────────────────────
+def split_message(text: str, max_len: int = 3800) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+    parts  = []
+    while len(text) > max_len:
+        cut = max_len
+        # Try to cut at last sentence end before the limit
+        for sep in ('\n\n', '\n', '. ', '! ', '? '):
+            pos = text.rfind(sep, 0, max_len)
+            if pos > max_len // 2:  # only cut here if it's past halfway
+                cut = pos + len(sep)
+                break
+        parts.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        parts.append(text)
+    return parts
+
+
+def send_reply_long(hwnd, message: str, user_type: str = "BOSS"):
+    \"\"\"
+    Sends message in chunks if it exceeds WhatsApp's limit.
+    Use this instead of send_reply() for AI-generated responses.
+    \"\"\"
+    chunks = split_message(message)
+    if len(chunks) == 1:
+        return send_reply(hwnd, message)
+    # Prefix multi-part messages
+    for i, chunk in enumerate(chunks, 1):
+        header = f"({i}/{len(chunks)}) " if len(chunks) > 1 else ""
+        send_reply(hwnd, header + chunk)
+        if i < len(chunks):
+            time.sleep(0.4)  # small pause between parts
+    return True
+"""
+
+# ── Step 3: In process_boss_message, add PC command router as the FIRST check
+#    after the loop-guard and always-on commands (ZULU OFF / ZULU ON / ZULU STATUS)
+#    and BEFORE the activation check.
+#    Find the block that starts "if 'ZULU OFF' in upper:" and add this block
+#    AFTER the instant commands section (after ZULU COUNTDOWN etc.), BEFORE:
+#    "# ── Activation required below this line ──"
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+    # ── 🖥️  PC CONTROL COMMANDS (zulu_pc.py) — zero AI, instant ───────────────
+    # Screenshot, open/close apps, volume, lock screen, brightness,
+    # browser, clipboard, file ops, remember/recall
+    pc_handled, pc_response = handle_pc_command(
+        msg.strip()[len("ZULU "):] if upper.startswith("ZULU ") else msg.strip(),
+        user_type
+    )
+    if pc_handled:
+        send_reply(hwnd, pc_response)
+        ZMEM.remember_task(user_type, msg[:60], "pc_control", pc_response[:80])
+        return
+
+    # ── 🌐  ZULU GOOGLE / ZULU YOUTUBE ────────────────────────────────────────
+    if upper.startswith("ZULU GOOGLE "):
+        q = msg.strip()[len("ZULU GOOGLE "):].strip()
+        from zulu_pc import google_search
+        send_reply(hwnd, google_search(q))
+        return
+
+    if upper.startswith("ZULU YOUTUBE "):
+        q = msg.strip()[len("ZULU YOUTUBE "):].strip()
+        from zulu_pc import youtube_search
+        send_reply(hwnd, youtube_search(q))
+        return
+
+    # ── 🎙️  ZULU VOICE STATUS ────────────────────────────────────────────────
+    if "ZULU VOICE STATUS" in upper or "ZULU VOICE" == upper.strip():
+        try:
+            from zulu_voice import voice_status
+            send_reply(hwnd, voice_status())
+        except ImportError:
+            send_reply(hwnd, "❌ zulu_voice.py not installed.")
+        return
+
+    if "ZULU VOICE ON" in upper:
+        try:
+            from zulu_voice import start_voice_engine
+            ok = start_voice_engine()
+            send_reply(hwnd, "🎙️ Voice engine started!" if ok else "❌ Voice engine failed — check dependencies.")
+        except ImportError:
+            send_reply(hwnd, "❌ zulu_voice.py not found.")
+        return
+
+    if "ZULU VOICE OFF" in upper:
+        try:
+            from zulu_voice import stop_voice_engine
+            stop_voice_engine()
+            send_reply(hwnd, "🔇 Voice engine stopped.")
+        except ImportError:
+            send_reply(hwnd, "❌ zulu_voice.py not found.")
+        return
+"""
+
+# ── Step 4: Update the ZULU HELP message to add new commands
+# ─────────────────────────────────────────────────────────────────────────────
+#   Add these lines inside the send_reply in the ZULU HELP handler:
+"""
+            " ZULU OPEN Chrome → open app\n"
+            " ZULU CLOSE Spotify → kill app\n"
+            " ZULU SCREENSHOT → capture screen\n"
+            " ZULU VOLUME UP/DOWN/50 → volume\n"
+            " ZULU MUTE / UNMUTE → toggle mute\n"
+            " ZULU LOCK SCREEN → lock PC\n"
+            " ZULU SLEEP PC → sleep\n"
+            " ZULU BRIGHTNESS 70 → set brightness\n"
+            " ZULU GOOGLE [query] → open Google\n"
+            " ZULU YOUTUBE [query] → YouTube search\n"
+            " ZULU OPEN https://... → open URL\n"
+            " ZULU CLIPBOARD → read clipboard\n"
+            " ZULU FIND [filename] → search D:\\\n"
+            " ZULU READ FILE [path] → read file\n"
+            " ZULU ZIP [folder] → zip a folder\n"
+            " ZULU REMEMBER [note] → save memory\n"
+            " ZULU RECALL → view memories\n"
+            " ZULU FORGET [keyword] → delete memory\n"
+            " ZULU VOICE ON/OFF/STATUS → voice engine\n"
+"""
+
+# ── Step 5: Add Morning Briefing Scheduler
+#    Paste this function near check_daily_reminders():
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+# ─────────────────────────────────────────────────────────────────────────────
+# 🌅  AUTO MORNING BRIEFING  (fires once per day at MORNING_BRIEFING_TIME)
+# ─────────────────────────────────────────────────────────────────────────────
+MORNING_BRIEFING_TIME = "09:00"   # ← change to your preferred time
+_morning_sent_date    = None       # tracks which date briefing was sent
+
+def check_morning_briefing(hwnd):
+    \"\"\"
+    Call this from scan_all_chats() every scan cycle.
+    Sends daily briefing to BOSS once per day at MORNING_BRIEFING_TIME.
+    \"\"\"
+    global _morning_sent_date
+
+    now   = datetime.datetime.now()
+    today = now.date()
+
+    if _morning_sent_date == today:
+        return   # already sent today
+
+    if now.strftime("%H:%M") != MORNING_BRIEFING_TIME:
+        return   # not time yet
+
+    _morning_sent_date = today
+
+    try:
+        # Build the briefing (same as ZULU BRIEFING command)
+        status         = get_status_report()
+        task_lines_str = ZMEM.get_task_context(last_n=5)
+        wa_data        = _load_wa_health()
+        wa_events      = len(wa_data.get("events", []))
+        wa_restarts    = wa_data.get("total_restarts", 0)
+
+        # Pending reminders
+        from boardroom_engine import get_reminder_count
+        reminders = get_reminder_count()
+
+        # Memories due today (anything remembered with 'today' keyword)
+        from zulu_pc import recall_memories
+        today_mems_raw = recall_memories("today")
+        has_mems = "today" in today_mems_raw.lower()
+
+        briefing = (
+            f"☀️ Good morning! ZULU Daily Briefing\n"
+            f"{'─'*30}\n"
+            f"{status}\n\n"
+            f"{task_lines_str}\n\n"
+            f"📋 Reminders:\n{reminders}\n\n"
+            f"📡 WA Health:\n"
+            f"  Events logged: {wa_events}\n"
+            f"  Total restarts: {wa_restarts}"
+        )
+        if has_mems:
+            briefing += f"\n\n🧠 You have memories tagged 'today'!\nSend: ZULU RECALL today"
+
+        # Open Boss's chat and send
+        boss_chat = ZSTATE.get("boss_chat") or ""
+        if boss_chat:
+            app = Desktop(backend="uia").window(handle=hwnd)
+            if open_chat(app, hwnd, boss_chat):
+                send_reply(hwnd, briefing)
+                zlog("tray", f"Morning briefing sent to {boss_chat}")
+        else:
+            zlog("tray", "Morning briefing: no boss chat known yet", "WARN")
+
+    except Exception as e:
+        zlog("tray", f"Morning briefing error: {e}", "ERROR")
+"""
+
+# ── Step 6: In scan_all_chats(), add morning briefing call
+#    Find "check_daily_reminders(hwnd)" and add right below it:
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+        check_morning_briefing(hwnd)    # v14.0 — auto morning briefing at 09:00
+"""
+
+# ── Step 7: In __main__, wire voice engine (optional — add after check_all_pings)
+# ─────────────────────────────────────────────────────────────────────────────
+"""
+    # ── Optional: auto-start voice engine on launch ──────────────────────────
+    try:
+        from zulu_voice import start_voice_engine
+        if start_voice_engine():
+            print("✅ Voice engine started — say 'Hey ZULU' to activate.")
+        else:
+            print("⚠️  Voice engine unavailable (install SpeechRecognition pyaudio pyttsx3)")
+    except ImportError:
+        print("⚠️  zulu_voice.py not found — voice disabled.")
+"""
+
+# ── Step 8: Add ZULU STATUS to the BOSS_CHAT state tracking in ZSTATE
+#    In the block that sets boss chat from sidebar, add:
+#    ZSTATE.set("boss_chat", name)   ← already in get_sidebar_chats(), you're good
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# PATCH 2 ── zulu_core.py
+# Replace the append-only log writer with a rotating one.
+# ───────────────────────────────────────────────────────────────────────────────
+
+# Find this function in zulu_core.py:
+"""
+def zlog(source: str, msg: str, level: str = "INFO"):
+    \"\"\"Write to unified log — all modules share one log file.\"\"\"
+    ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] [{level:<5}] [{source:<12}] {msg}\n"
+    with _lock_log:
+        try:
+            with open(UNIFIED_LOG, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+    print(f" 📋 {line.strip()}")
+"""
+
+# Replace the entire function with this:
+"""
+# Log rotation threshold — rename and start fresh when file exceeds this
+LOG_MAX_BYTES = 5 * 1024 * 1024   # 5 MB
+
+
+def _rotate_log_if_needed():
+    \"\"\"If UNIFIED_LOG > LOG_MAX_BYTES, rotate it to a dated archive.\"\"\"
+    try:
+        if not os.path.exists(UNIFIED_LOG):
+            return
+        if os.path.getsize(UNIFIED_LOG) < LOG_MAX_BYTES:
+            return
+        ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive  = UNIFIED_LOG.replace(".log", f"_{ts}.log")
+        os.rename(UNIFIED_LOG, archive)
+        # Keep only last 5 archives — delete oldest
+        import glob
+        archives = sorted(
+            glob.glob(UNIFIED_LOG.replace(".log", "_*.log")),
+            key=os.path.getmtime
+        )
+        for old in archives[:-5]:
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def zlog(source: str, msg: str, level: str = "INFO"):
+    \"\"\"Write to unified log — all modules share one log file. Auto-rotates at 5 MB.\"\"\"
+    ts   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] [{level:<5}] [{source:<12}] {msg}\n"
+    with _lock_log:
+        _rotate_log_if_needed()
+        try:
+            with open(UNIFIED_LOG, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+    print(f" 📋 {line.strip()}")
+"""
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# PATCH 3 ── boardroom_engine.py  (screenshot function + send_reply_long)
+# ───────────────────────────────────────────────────────────────────────────────
+
+# Find report_to_boss() in boardroom_engine.py.
+# Replace all calls to report_to_boss() in launch_boardroom() with
+# send_reply_long() for long AI responses. Specifically in these lines:
+"""
+# BEFORE:
+            success = report_to_boss(final_msg, user_type)
+
+# AFTER (add length guard):
+            if len(final_msg) > 3800:
+                # Import the long sender from tray if available
+                try:
+                    from zulu_tray import send_reply_long as _srl, _wa_hwnd
+                    success = _srl(_wa_hwnd, final_msg, user_type)
+                except Exception:
+                    success = report_to_boss(final_msg[:3800], user_type)
+            else:
+                success = report_to_boss(final_msg, user_type)
+"""
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# INSTALL CHECKLIST
+# ───────────────────────────────────────────────────────────────────────────────
+"""
+Run these in your project venv:
+
+  # Voice engine
+  pip install SpeechRecognition pyttsx3
+
+  # PyAudio (Windows — use pipwin if direct install fails)
+  pip install pyaudio
+  # OR:
+  pip install pipwin && pipwin install pyaudio
+
+  # Volume control (optional but recommended for precise % control)
+  pip install pycaw comtypes
+
+  # Brightness control (optional)
+  pip install screen-brightness-control
+
+  # Already installed in your project:
+  # psutil ✅  pyautogui ✅  pywin32 ✅  pywinauto ✅
+"""
+
+# ───────────────────────────────────────────────────────────────────────────────
+# FILE PLACEMENT
+# ───────────────────────────────────────────────────────────────────────────────
+"""
+Place these files in the same folder as your other ZULU files:
+  zulu_pc.py         ← new
+  zulu_voice.py      ← new
+  zulu_core.py       ← patched (log rotation)
+  zulu_tray.py       ← patched (new commands + split_message + morning briefing)
+  boardroom_engine.py ← optional patch for send_reply_long
+  agency_config.py   ← no changes needed
+  brain_manager.py   ← no changes needed
+"""
+
+# ───────────────────────────────────────────────────────────────────────────────
+# NEW COMMANDS SUMMARY (send from WhatsApp to test)
+# ───────────────────────────────────────────────────────────────────────────────
+"""
+🖥️  App Control:
+  ZULU OPEN Chrome
+  ZULU OPEN VS Code
+  ZULU OPEN Spotify
+  ZULU CLOSE Discord
+  ZULU OPEN https://github.com
+
+🔊  Volume:
+  ZULU VOLUME UP
+  ZULU VOLUME DOWN 20
+  ZULU VOLUME 50         (set to 50%)
+  ZULU MUTE / ZULU UNMUTE
+  ZULU VOLUME            (check current level)
+
+🔒  System:
+  ZULU LOCK SCREEN
+  ZULU SLEEP PC
+  ZULU SHUTDOWN PC       (60s delay)
+  ZULU CANCEL SHUTDOWN
+  ZULU RESTART PC
+
+☀️  Brightness:
+  ZULU BRIGHTNESS 80
+  ZULU BRIGHTNESS        (check current)
+
+📸  Screenshot:
+  ZULU SCREENSHOT
+  (saves to D:\AI_Agency_Work\Screenshots\)
+
+🌐  Browser:
+  ZULU OPEN https://youtube.com
+  ZULU GOOGLE latest Python tutorials
+  ZULU YOUTUBE lofi music
+
+📋  Clipboard:
+  ZULU CLIPBOARD         (read clipboard)
+  ZULU READ CLIPBOARD
+
+📁  File ops:
+  ZULU FIND budget.xlsx
+  ZULU READ FILE D:\path\to\file.py
+  ZULU OPEN FILE D:\path\to\file.py
+  ZULU ZIP D:\AI_Agency_Work\Projects
+
+🧠  Memory:
+  ZULU REMEMBER Netflix password is hunter2
+  ZULU RECALL
+  ZULU RECALL password
+  ZULU FORGET Netflix
+
+🎙️  Voice:
+  ZULU VOICE ON          (enable voice engine)
+  ZULU VOICE OFF         (disable)
+  ZULU VOICE STATUS      (check if running)
+  (then say out loud: "Hey ZULU open Chrome")
+"""

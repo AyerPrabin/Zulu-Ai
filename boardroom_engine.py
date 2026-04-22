@@ -1494,6 +1494,13 @@ def launch_boardroom(command, user_type="BOSS"):
                 success = report_to_boss(final_msg, user_type)
                 if success:
                     ZMEM.remember_task(user_type, command, task_level, final_msg)
+                    # 📡 Emit task completion event (picked up by zulu_voice, dashboard, etc.)
+                    ZBUS.emit("task_done", {
+                        "user": user_type,
+                        "task": command,
+                        "result": final_msg,
+                        "mode": task_level
+                    })
                 else:
                     print(f" Failed to send message back to {user_type}. WhatsApp might not be open.")
             else:
@@ -1504,8 +1511,20 @@ def launch_boardroom(command, user_type="BOSS"):
             print(f" Error response: {err}")
             report_to_boss(f"❌ Error: {err}", user_type)
             remember_mistake(command, err, task_level)
+            # 📡 Emit task failed event
+            ZBUS.emit("task_failed", {
+                "user": user_type,
+                "task": command,
+                "error": err
+            })
 
     except Exception as e:
         err = str(e)
         remember_mistake(command, err, task_level)
         report_to_boss(f"Error: {err}", user_type)
+        # 📡 Emit task failed event (exception)
+        ZBUS.emit("task_failed", {
+            "user": user_type,
+            "task": command,
+            "error": err
+        })

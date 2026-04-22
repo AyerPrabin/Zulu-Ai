@@ -4,7 +4,7 @@ import json
 import os
 import threading
 import time
-
+from zulu_core import zlog, ZMEM, ZSTATE, ZBUS
 # ─────────────────────────────────────────────────────────────────────────────
 # 📂 PATHS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +349,13 @@ class _EventBus:
         """Subscribe to an event. handler(data) will be called on emit."""
         with _lock_bus:
             self._handlers.setdefault(event, []).append(handler)
+
+    def off(self, event: str, handler):
+        """Unsubscribe a handler from an event."""
+        with _lock_bus:
+            handlers = self._handlers.get(event, [])
+            if handler in handlers:
+                handlers.remove(handler)
 
     def emit(self, event: str, data: dict = None):
         """Publish an event. All subscribers are called in background threads."""
